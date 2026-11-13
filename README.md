@@ -55,9 +55,27 @@ TF=该词次数/该文档有效非停用token总数。有效文档数N，df为�
 
 主题编号是数值因子，不是语义标签。每个编号必须有唯一1—40字人工名称才能提审；管理员批准后报告固定引用该命名版本。种子中的“访谈线索一…”是模拟研究组编号，不是自动语义判断。
 
+## 补访批量投影
+
+已完成运行可用于补访文本的批量投影，入口 `POST /runs/{id}/projections`（analyst/admin；viewer 403，匿名 401），页面在“05 主题与近邻”下方。
+
+请求二选一：`{"documents":[{"doc_id":"...","text":"..."}]}` 或 `{"csv_text":"doc_id,text\n..."}`；同时提供两者、都缺失或空数组均 422。单批 1—600 篇，doc_id 须非空且不超过200字、不得与原运行有效/隔离文档重复，文本须1—2000字，CSV 上限1.8M字符。
+
+投影固定沿用原运行持久化的词典快照（terms/stopwords）、vocabulary 顺序、idf 与原 `nmf.h`：按同一最长词表匹配分词，`x_j = count_j/该文档有效token数 × idf_j`，只对每篇文档独立求解非负 W（固定 H 的乘法更新，`w *= (x·Hᵀ)/(w·H·Hᵀ+1e−12)`）。初始化为该文档的 `sqrt(mean(x)/K)`，第10次迭代起相邻绝对误差相对变化小于 1e−10 判定 converged，上限2000次。初始化、迭代与停止只依赖该文档向量，因此同一补访文档单独提交、拆批或换序得到相同权重、误差与近邻；不重算 idf、不重排词项、不重新训练 H、不写回原运行，也不改动人工命名复核记录。
+
+结果逐篇返回原始非负权重 `weights`、展示用 `display_fractions`（行内占比，仅显示）、`reconstruction_error=||x−wH||` 与相对误差、迭代次数/是否收敛、未知字符数、词表外词项，以及与原运行有效文档的余弦近邻（行L2归一，前3，同值按 doc_id 排序，不包含补访文档之间）。汇总返回合计/最大相对重建误差。
+
+无有效受控词项的文档、以及词项全部不在原运行特征词表的文档不计权重与误差，单列于 `isolated` 并写明原因、未知字符和词表外词项。TF 分母包含原运行词表外的受控词项，但这些词项不进入特征。
+
+投影前先校验原运行计算依据：须为 completed，且 `lexicon_snapshot`、`vocabulary`、`idf`、`df`、`sparse_tfidf`（含 doc_id/token_count/非零索引）、`nmf.h` 齐全且相互一致；idf 可由 df 与有效文档数复算、稀疏权重可由词频/token总数与 idf 复算，H 非负无全零行且列数匹配，有效/隔离 doc_id 不冲突。旧运行 JSON 若仅缺 checksum/显示性字段则兼容；缺失或篡改任何数值计算依据时返回 422 并列出具体问题，绝不重新训练、补算或静默降级。
+
 ## 配额与失败态
 
 CSV列doc_id,text；至少2、最多600篇，每篇1—2000字符，最多80词、8主题、600次迭代。前端文件上限1.8MB，API字段上限1.8M字符；Nginx请求上限6MiB以容纳合法JSON编码开销。短行、空文本、重复ID、空有效词表/重复词/词表外停用词拒绝。全零语料或主题数超过有效维度时worker.failed，错误可见，不静默降低主题数。
+
+## 补访投影的边界
+
+投影只沿用原运行的词典、词项顺序、IDF 与 H，不重新训练，也不改动原运行或人工命名；它给补访文本一个可复核的近似权重，不能据此声称新主题、旧主题的语义扩张或群体结论。基准运行本身若已不满足原方法口径（如词典被后续版本替换），投影不会“修好”它，只会按当时的持久化依据复现或在依据不全时拒绝。补访文档只与原运行有效文档比较近邻；词表外措辞会被计入 TF 分母但不产生特征，未覆盖严重时请复核词典，而不是解读零权重。
 
 ## 技术与结构
 
@@ -67,7 +85,7 @@ CSV列doc_id,text；至少2、最多600篇，每篇1—2000字符，最多80词�
 | 后端 | Python3.12 / FastAPI / psycopg3 / NumPy2.2.1 |
 | 异步与存储 | Redis7.4、独立Python worker、PostgreSQL16 |
 
-80职责源文件。后端src/{routes,controllers,services,models,schemas,middlewares,utils,constants,config}，前端src/{api,stores,types,components/common,hooks,pages,router,utils,constants}。业务表TEXT主键+JSON文本载荷；迁移DDL在backend/migrations/001_initial.sql。事务级advisory lock保护首次并发建表，OPENBLAS/OMP线程固定1避免并发过量与数值执行差异。
+83职责源文件（另含backend/tests下的投影单元与HTTP测试）。后端src/{routes,controllers,services,models,schemas,middlewares,utils,constants,config}，前端src/{api,stores,types,components/common,hooks,pages,router,utils,constants}。业务表TEXT主键+JSON文本载荷；迁移DDL在backend/migrations/001_initial.sql。事务级advisory lock保护首次并发建表，OPENBLAS/OMP线程固定1避免并发过量与数值执行差异。
 
 枚举：后端src/constants/enums.py角色/状态、src/constants/domain.py配额；前端src/constants/enums.ts。模型/schema/前端类型保持六实体一致。环境变量DATABASE_URL、REDIS_URL、JWT_SECRET、SEED_DEMO、TASK_MODE、ARTIFACT_DIR及端口/口令见.env.example。
 
